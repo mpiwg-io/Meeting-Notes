@@ -1,0 +1,96 @@
+We discuss 3 variants of changes to filew views, all designed to enable
+non-contiguous independent I/O operations, which are not possible with the
+current APIs and semantics.
+
+Options:
+
+A - Add an "view is local" key to the Info object that MPI_File_set_view()
+    takes, which allows a rank-specific override of MPI_File_write()
+    operations.  For example, something like the code below:
+
+=========
+
+    /* Set "view is local" info key for MPI_File_set_view() call */
+    MPI_Info_create(&info);
+    MPI_Info_set(info, "view_is_local", "true");
+
+    /* MPI_File_set_view() sets the file visible region to this process starts
+     * at offset. Setting etype argument to MPI_INT means this file will be
+     * accessed in the units of integer size. Setting filetype argument to
+     * MPI_INT means a contiguous 4-byte region (assuming integer size if 4
+     * bytes) is recursively applied to the file to form the visible region to
+     * the calling process, starting from its "offset" set in the offset
+     * argument. In this example, the "file view" of a process is the entire
+     * file starting from its offset.
+     */
+    err = MPI_File_set_view(fh, offset, MPI_INT, MPI_INT, "native", info);
+    CHECK_ERR(MPI_File_set_view);
+
+    /* Each process writes 3 integers to the file region visible to it.
+     * Note the file pointer will advance 3x4 bytes after this call.
+     */
+    err = MPI_File_write(fh, &buf[0], 3, MPI_INT, &status);
+    CHECK_ERR(MPI_File_set_view);
+
+=========
+
+    The option was rejected due to the difficulties in avoiding hangs on
+    remote processes that perform collective operations and don't know
+    that other processes have set local file views.   Additionally, setting
+    a file view is defined to be a collective operation currently and even if
+    relax that requirement for setting a view with a "local" key, it may
+    be impossible to switch _back_ to a collective view without performing
+    a collective operation that the other processes aren't aware they should
+    do.   (I believe there were some other reasons that came up during the
+    discussion also, if anyone else recalls them)
+
+---
+
+B - Add a "views are local" key to the Info object that MPI_File_open()
+    takes, allowing each rank to specify their own views.  For example,
+    something like the code below:
+
+=========
+
+    /* Set "view is local" info key for MPI_File_open() call */
+    MPI_Info_create(&info);
+    MPI_Info_set(info, "view_is_local", "true");
+
+    /* open a file (create if the file does not exist) */
+    cmode = MPI_MODE_CREATE | MPI_MODE_RDWR;
+    err = MPI_File_open(MPI_COMM_WORLD, filename, cmode, info, &fh);
+    CHECK_ERR(MPI_File_open);
+
+=========
+
+    This was rejected due to the "spooky action at a distance" nature of
+    changing the semantics of MPI_File_set_view() with an info key specified
+    at file open.  Also, many people trended toward thinking about info keys
+    as 'hints', and setting this key was a very significant change to the
+    required behavior of file views.
+
+---
+
+C - Add non-view based read & write operations to the standard, where the
+    datatype & offset in the file is specified with each I/O operation.
+    For example, something like the code below:
+
+=========
+
+    /* Each process writes 3 integers to the file region visible to it.
+     * Note the file pointer will advance 3x4 bytes after this call.
+     */
+    err = MPI_File_new_write(fh, offset, MPI_INT, MPI_INT, &buf[0], 3, MPI_INT, &status);
+    CHECK_ERR(MPI_File_set_view);
+
+
+=========
+
+    Ultimately, this is the direction we decided to go.  It can co-exist with
+    existing file I/O operationa that rely on file views, while enabling
+    applications & middleware that wish to perform non-contiguous independent
+    operations.
+
+    Action item:  Quincey will come up with suggested API routines, limiting
+        the scope to the following matrix:  collective/independent X blocking/
+        nonblocking X "explicit offset"/"individual file pointer"
